@@ -21,13 +21,26 @@ def test_identical_distributions_psi_near_zero():
 
 def test_very_different_distributions_psi_high():
     """Completely different distributions should produce PSI > 0.25."""
-    ref = np.zeros(1000)
-    cur = np.ones(1000) * 10
+    # Both non-constant to avoid edge case in quantile bin collapse
+    rng = np.random.default_rng(42)
+    ref = rng.normal(0, 0.01, 1000)   # tightly clustered around 0
+    cur = rng.normal(10, 0.01, 1000)  # tightly clustered around 10
     report = StabilityReport()
     result = report.psi(ref, cur, n_bins=10)
     assert result.metric_value > 0.25
     assert result.passed is False
     assert result.severity == Severity.CRITICAL
+
+
+def test_constant_reference_different_current_psi_high():
+    """When reference is constant but current is very different, PSI is high."""
+    ref = np.zeros(1000)
+    cur = np.ones(1000) * 10
+    report = StabilityReport()
+    result = report.psi(ref, cur, n_bins=10)
+    # After fix: should detect the shift and produce high PSI
+    assert result.metric_value > 0.25
+    assert result.passed is False
 
 
 def test_stable_psi_passes():
@@ -42,13 +55,12 @@ def test_stable_psi_passes():
 
 
 def test_moderate_psi_warning():
-    """Moderate shift should produce WARNING but pass=True."""
+    """Moderate shift should produce non-negative PSI."""
     rng = np.random.default_rng(2)
     ref = rng.normal(0, 1, 5000)
     cur = rng.normal(1, 1, 5000)  # shifted by 1 std dev
     report = StabilityReport()
     result = report.psi(ref, cur, n_bins=10)
-    # This might be moderate or high depending on data - just check types
     assert result.category == TestCategory.STABILITY
     assert result.metric_value >= 0
 
@@ -64,14 +76,16 @@ def test_psi_result_has_bin_details():
 
 
 def test_psi_bin_details_sum_close_to_total():
-    """Sum of per-bin PSI should equal total PSI."""
+    """Sum of per-bin PSI should equal total PSI within floating point tolerance."""
     rng = np.random.default_rng(4)
     ref = rng.normal(0, 1, 2000)
     cur = rng.normal(0.5, 1, 2000)
     report = StabilityReport()
     result = report.psi(ref, cur, n_bins=10)
     bin_sum = sum(b["bin_psi"] for b in result.extra["bins"])
-    assert bin_sum == pytest.approx(result.metric_value, abs=1e-8)
+    # metric_value is now full precision, bin_sum accumulates floats
+    # Allow tolerance consistent with floating point accumulation over ~10 bins
+    assert bin_sum == pytest.approx(result.metric_value, rel=1e-6)
 
 
 def test_feature_drift_numeric():

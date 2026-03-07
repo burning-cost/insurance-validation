@@ -144,7 +144,10 @@ class PerformanceReport:
         -------
         TestResult
         """
-        gini = _weighted_gini(self._y_true, self._y_pred, self._weights)
+        # Use exposure as weight for the Lorenz curve when no separate weights provided.
+        # This is the actuarial convention: exposure-weighted Gini.
+        lorenz_weights = self._weights if self._weights is not None else self._exposure
+        gini = _weighted_gini(self._y_true, self._y_pred, lorenz_weights)
 
         passed = gini >= min_acceptable
         if gini >= 0.3:
@@ -189,7 +192,8 @@ class PerformanceReport:
         -------
         TestResult with extra["x"] and extra["y"] lists.
         """
-        w = self._weights if self._weights is not None else np.ones(len(self._y_true))
+        lorenz_weights = self._weights if self._weights is not None else self._exposure
+        w = lorenz_weights if lorenz_weights is not None else np.ones(len(self._y_true))
         order = np.argsort(-self._y_pred)
         y_sorted = self._y_true[order]
         w_sorted = w[order]
@@ -208,7 +212,7 @@ class PerformanceReport:
         x_sample = x_full[indices].tolist()
         y_sample = y_full[indices].tolist()
 
-        gini = _weighted_gini(self._y_true, self._y_pred, self._weights)
+        gini = _weighted_gini(self._y_true, self._y_pred, lorenz_weights)
 
         return TestResult(
             test_name="lorenz_curve",

@@ -77,18 +77,32 @@ def _psi_score(
         # Quantile-based bins from reference
         quantiles = np.linspace(0, 100, n_bins + 1)
         bin_edges = np.percentile(reference, quantiles)
-        # Ensure uniqueness (can collapse for discrete variables)
+        # Ensure uniqueness (can collapse for discrete/constant variables)
         bin_edges = np.unique(bin_edges)
         if len(bin_edges) < 2:
-            return 0.0, []
+            # Reference is constant. Expand range to cover both distributions.
+            all_vals = np.concatenate([reference, current])
+            vmin, vmax = float(all_vals.min()), float(all_vals.max())
+            if vmin == vmax:
+                # Both distributions are identical single-value - PSI = 0
+                return 0.0, []
+            bin_edges = np.linspace(vmin, vmax, n_bins + 1)
     else:
         bin_edges = bins
+
+    # Ensure the last bin edge captures max values (right edge inclusive)
+    bin_edges = bin_edges.copy()
+    bin_edges[-1] = max(bin_edges[-1], float(current.max()) + 1e-10, float(reference.max()) + 1e-10)
 
     ref_counts, _ = np.histogram(reference, bins=bin_edges)
     cur_counts, _ = np.histogram(current, bins=bin_edges)
 
-    ref_pct = (ref_counts + epsilon) / (len(reference) + epsilon * len(ref_counts))
-    cur_pct = (cur_counts + epsilon) / (len(current) + epsilon * len(cur_counts))
+    n_ref = float(len(reference))
+    n_cur = float(len(current))
+    n_bins_actual = len(ref_counts)
+
+    ref_pct = (ref_counts + epsilon) / (n_ref + epsilon * n_bins_actual)
+    cur_pct = (cur_counts + epsilon) / (n_cur + epsilon * n_bins_actual)
 
     bin_psi = (cur_pct - ref_pct) * np.log(cur_pct / ref_pct)
     psi_total = float(bin_psi.sum())
@@ -102,7 +116,7 @@ def _psi_score(
             "current_pct": float(cur_pct[i]),
             "bin_psi": float(bin_psi[i]),
         }
-        for i in range(len(ref_counts))
+        for i in range(n_bins_actual)
     ]
 
     return psi_total, bin_details
@@ -176,7 +190,7 @@ class StabilityReport:
             test_name=f"psi_{label}",
             category=TestCategory.STABILITY,
             passed=passed,
-            metric_value=round(psi_val, 6),
+            metric_value=psi_val,  # Full precision - do not round here
             details=details,
             severity=severity,
             extra={"bins": bin_details, "n_bins": n_bins, "label": label},
@@ -229,7 +243,7 @@ class StabilityReport:
             if feat not in current_df.columns:
                 results.append(
                     TestResult(
-                        test_name=f"psi_{feat}",
+                        test_name=f"feature_drift_{feat}",
                         category=TestCategory.STABILITY,
                         passed=False,
                         details=f"Feature '{feat}' not found in current dataset.",
@@ -269,8 +283,9 @@ class StabilityReport:
                 epsilon = 1e-6
                 n_ref = len(reference_df)
                 n_cur = len(current_df)
-                ref_pct = (merged["ref_count"].fill_null(0).to_numpy() + epsilon) / (n_ref + epsilon * len(merged))
-                cur_pct = (merged["cur_count"].fill_null(0).to_numpy() + epsilon) / (n_cur + epsilon * len(merged))
+                n_cats = len(merged)
+                ref_pct = (merged["ref_count"].fill_null(0).to_numpy() + epsilon) / (n_ref + epsilon * n_cats)
+                cur_pct = (merged["cur_count"].fill_null(0).to_numpy() + epsilon) / (n_cur + epsilon * n_cats)
                 bin_psi = (cur_pct - ref_pct) * np.log(cur_pct / ref_pct)
                 psi_val = float(bin_psi.sum())
                 bin_details = []
@@ -293,7 +308,7 @@ class StabilityReport:
                     test_name=f"feature_drift_{feat}",
                     category=TestCategory.STABILITY,
                     passed=passed,
-                    metric_value=round(psi_val, 6),
+                    metric_value=psi_val,  # Full precision
                     details=(
                         f"Feature drift PSI for '{feat}': {psi_val:.4f} - {interp}."
                     ),
