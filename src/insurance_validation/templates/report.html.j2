@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Validation Report: {{ card.model_name }}</title>
+    <style>
+        /* Reset and base */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            font-size: 14px;
+            line-height: 1.6;
+            color: #1a1a2e;
+            background: #f8f9fa;
+        }
+        /* Layout */
+        .container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+        /* Header */
+        .report-header {
+            background: #1a1a2e;
+            color: #fff;
+            padding: 2rem 2.5rem;
+            border-radius: 8px 8px 0 0;
+            margin-bottom: 0;
+        }
+        .report-header h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.25rem; }
+        .report-header .subtitle { font-size: 0.875rem; color: #94a3b8; margin-bottom: 1rem; }
+        .header-meta {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 0.5rem;
+            font-size: 0.8125rem;
+        }
+        .header-meta-item { color: #94a3b8; }
+        .header-meta-item strong { color: #e2e8f0; }
+        /* Status banner */
+        .status-banner {
+            padding: 1rem 2.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-weight: 600;
+            font-size: 0.9375rem;
+        }
+        .status-banner.pass { background: #d1fae5; color: #065f46; }
+        .status-banner.fail { background: #fee2e2; color: #991b1b; }
+        .status-banner.warn { background: #fef3c7; color: #92400e; }
+        /* Sections */
+        .section {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            margin-top: 1.5rem;
+            overflow: hidden;
+        }
+        .section-header {
+            background: #f1f5f9;
+            padding: 0.875rem 1.5rem;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .section-header h2 {
+            font-size: 0.9375rem;
+            font-weight: 600;
+            color: #1e293b;
+        }
+        .section-body { padding: 1.25rem 1.5rem; }
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8125rem;
+        }
+        th {
+            background: #f8fafc;
+            text-align: left;
+            padding: 0.5rem 0.75rem;
+            border-bottom: 2px solid #e2e8f0;
+            font-weight: 600;
+            color: #475569;
+            white-space: nowrap;
+        }
+        td {
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid #f1f5f9;
+            vertical-align: top;
+        }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: #f8fafc; }
+        /* Badges */
+        .badge {
+            display: inline-block;
+            padding: 0.125rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+        .badge-pass { background: #d1fae5; color: #065f46; }
+        .badge-fail { background: #fee2e2; color: #991b1b; }
+        .badge-info { background: #dbeafe; color: #1e40af; }
+        .badge-warning { background: #fef3c7; color: #92400e; }
+        .badge-critical { background: #fee2e2; color: #991b1b; }
+        /* Model card grid */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1rem;
+        }
+        .card-item {}
+        .card-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #64748b;
+            margin-bottom: 0.2rem;
+        }
+        .card-value { font-size: 0.875rem; color: #1e293b; }
+        /* Metric pill */
+        .metric-value {
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 0.8125rem;
+        }
+        /* Tier badge */
+        .tier-1 { background: #fee2e2; color: #991b1b; }
+        .tier-2 { background: #fef3c7; color: #92400e; }
+        .tier-3 { background: #d1fae5; color: #065f46; }
+        /* Summary stats */
+        .summary-stats {
+            display: flex;
+            gap: 2rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+        }
+        .stat-block { text-align: center; }
+        .stat-number { font-size: 2rem; font-weight: 700; line-height: 1; }
+        .stat-label { font-size: 0.75rem; color: #64748b; margin-top: 0.25rem; }
+        .stat-pass { color: #059669; }
+        .stat-fail { color: #dc2626; }
+        .stat-warn { color: #d97706; }
+        /* Details text */
+        .details-text { color: #475569; font-size: 0.8125rem; max-width: 600px; }
+        /* Footer */
+        .report-footer {
+            margin-top: 2rem;
+            padding: 1rem 0;
+            font-size: 0.75rem;
+            color: #94a3b8;
+            border-top: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+        }
+        /* Limitations box */
+        .limitations-box {
+            background: #fffbeb;
+            border: 1px solid #fcd34d;
+            border-radius: 6px;
+            padding: 1rem 1.25rem;
+            font-size: 0.875rem;
+        }
+        .limitations-box strong { color: #92400e; }
+        /* Category chip */
+        .cat-chip {
+            display: inline-block;
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            background: #e2e8f0;
+            color: #475569;
+        }
+        /* Responsive */
+        @media (max-width: 640px) {
+            .report-header { padding: 1.25rem; }
+            .section-body { padding: 1rem; }
+            .card-grid { grid-template-columns: 1fr 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- Report header -->
+    <div class="report-header">
+        <h1>Model Validation Report</h1>
+        <div class="subtitle">{{ card.model_name }} v{{ card.version }}</div>
+        <div class="header-meta">
+            <div class="header-meta-item"><strong>Generated:</strong> {{ generated_date }}</div>
+            <div class="header-meta-item"><strong>Developer:</strong> {{ card.developer }}</div>
+            <div class="header-meta-item"><strong>Materiality Tier:</strong> {{ card.materiality_tier }}</div>
+            <div class="header-meta-item"><strong>Model Type:</strong> {{ card.model_type }} ({{ card.distribution_family }})</div>
+            {% if card.validator_name %}
+            <div class="header-meta-item"><strong>Validator:</strong> {{ card.validator_name }}</div>
+            {% endif %}
+            {% if card.validation_date %}
+            <div class="header-meta-item"><strong>Validation Date:</strong> {{ card.validation_date }}</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Status banner -->
+    {% set n_critical = results | selectattr('severity', 'equalto', 'critical') | selectattr('passed', 'equalto', false) | list | length %}
+    {% set n_warn = results | selectattr('severity', 'equalto', 'warning') | selectattr('passed', 'equalto', false) | list | length %}
+    {% if n_critical > 0 %}
+    <div class="status-banner fail">
+        VALIDATION STATUS: FAIL - {{ n_critical }} critical finding(s) require resolution before production sign-off.
+    </div>
+    {% elif n_warn > 0 %}
+    <div class="status-banner warn">
+        VALIDATION STATUS: CONDITIONAL - {{ n_warn }} warning(s) require documented management decisions.
+    </div>
+    {% else %}
+    <div class="status-banner pass">
+        VALIDATION STATUS: PASS - No critical or warning findings.
+    </div>
+    {% endif %}
+
+    <!-- Summary table -->
+    <div class="section">
+        <div class="section-header">
+            <h2>Results Summary</h2>
+        </div>
+        <div class="section-body">
+            {% set n_pass = results | selectattr('passed', 'equalto', true) | list | length %}
+            {% set n_fail = results | selectattr('passed', 'equalto', false) | list | length %}
+            <div class="summary-stats">
+                <div class="stat-block">
+                    <div class="stat-number" style="color:#1e293b">{{ results | length }}</div>
+                    <div class="stat-label">Total Tests</div>
+                </div>
+                <div class="stat-block">
+                    <div class="stat-number stat-pass">{{ n_pass }}</div>
+                    <div class="stat-label">Passed</div>
+                </div>
+                <div class="stat-block">
+                    <div class="stat-number stat-fail">{{ n_fail }}</div>
+                    <div class="stat-label">Failed</div>
+                </div>
+                <div class="stat-block">
+                    <div class="stat-number stat-warn">{{ n_warn }}</div>
+                    <div class="stat-label">Warnings</div>
+                </div>
+                <div class="stat-block">
+                    <div class="stat-number stat-fail">{{ n_critical }}</div>
+                    <div class="stat-label">Critical</div>
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Test</th>
+                        <th>Category</th>
+                        <th>Result</th>
+                        <th>Severity</th>
+                        <th>Metric</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for r in results %}
+                    <tr>
+                        <td><code style="font-size:0.8125rem">{{ r.test_name }}</code></td>
+                        <td><span class="cat-chip">{{ r.category }}</span></td>
+                        <td>
+                            {% if r.passed %}
+                            <span class="badge badge-pass">Pass</span>
+                            {% else %}
+                            <span class="badge badge-fail">Fail</span>
+                            {% endif %}
+                        </td>
+                        <td><span class="badge badge-{{ r.severity }}">{{ r.severity }}</span></td>
+                        <td class="metric-value">
+                            {% if r.metric_value is not none %}{{ "%.4f" | format(r.metric_value) }}{% else %}-{% endif %}
+                        </td>
+                        <td class="details-text">{{ r.details }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 1. Model Card -->
+    <div class="section">
+        <div class="section-header">
+            <h2>1. Model Card</h2>
+        </div>
+        <div class="section-body">
+            <div class="card-grid" style="margin-bottom:1.25rem">
+                {% for k, v in card.summary().items() %}
+                <div class="card-item">
+                    <div class="card-label">{{ k }}</div>
+                    <div class="card-value">{{ v }}</div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <div class="card-item" style="margin-bottom:1rem">
+                <div class="card-label">Purpose</div>
+                <div class="card-value">{{ card.purpose }}</div>
+            </div>
+
+            <div class="card-item" style="margin-bottom:1rem">
+                <div class="card-label">Intended Use</div>
+                <div class="card-value">{{ card.intended_use }}</div>
+            </div>
+
+            <div class="limitations-box">
+                <strong>Known Limitations:</strong> {{ card.limitations }}
+            </div>
+
+            {% if card.alternatives_considered %}
+            <div class="card-item" style="margin-top:1rem">
+                <div class="card-label">Alternatives Considered</div>
+                <div class="card-value">{{ card.alternatives_considered }}</div>
+            </div>
+            {% endif %}
+
+            <div class="card-item" style="margin-top:1rem">
+                <div class="card-label">Model Variables ({{ card.variables | length }})</div>
+                <div class="card-value">{{ card.variables | join(', ') }}</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. Data Quality -->
+    {% set dq_results = results | selectattr('category', 'equalto', 'data_quality') | list %}
+    {% if dq_results %}
+    <div class="section">
+        <div class="section-header">
+            <h2>2. Data Quality Assessment</h2>
+        </div>
+        <div class="section-body">
+            <table>
+                <thead>
+                    <tr><th>Test</th><th>Result</th><th>Severity</th><th>Metric</th><th>Details</th></tr>
+                </thead>
+                <tbody>
+                {% for r in dq_results %}
+                <tr>
+                    <td><code style="font-size:0.8125rem">{{ r.test_name }}</code></td>
+                    <td>{% if r.passed %}<span class="badge badge-pass">Pass</span>{% else %}<span class="badge badge-fail">Fail</span>{% endif %}</td>
+                    <td><span class="badge badge-{{ r.severity }}">{{ r.severity }}</span></td>
+                    <td class="metric-value">{% if r.metric_value is not none %}{{ "%.4f" | format(r.metric_value) }}{% else %}-{% endif %}</td>
+                    <td class="details-text">{{ r.details }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 3. Performance Validation -->
+    {% set perf_results = results | selectattr('category', 'equalto', 'performance') | list %}
+    {% if perf_results %}
+    <div class="section">
+        <div class="section-header">
+            <h2>3. Performance Validation</h2>
+        </div>
+        <div class="section-body">
+            <table>
+                <thead>
+                    <tr><th>Test</th><th>Result</th><th>Severity</th><th>Metric</th><th>Details</th></tr>
+                </thead>
+                <tbody>
+                {% for r in perf_results %}
+                <tr>
+                    <td><code style="font-size:0.8125rem">{{ r.test_name }}</code></td>
+                    <td>{% if r.passed %}<span class="badge badge-pass">Pass</span>{% else %}<span class="badge badge-fail">Fail</span>{% endif %}</td>
+                    <td><span class="badge badge-{{ r.severity }}">{{ r.severity }}</span></td>
+                    <td class="metric-value">{% if r.metric_value is not none %}{{ "%.4f" | format(r.metric_value) }}{% else %}-{% endif %}</td>
+                    <td class="details-text">{{ r.details }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 4. Discrimination / Fairness -->
+    {% set disc_results = results | selectattr('category', 'equalto', 'discrimination') | list %}
+    {% if disc_results %}
+    <div class="section">
+        <div class="section-header">
+            <h2>4. Discrimination and Fairness (FCA Consumer Duty)</h2>
+        </div>
+        <div class="section-body">
+            <table>
+                <thead>
+                    <tr><th>Test</th><th>Result</th><th>Severity</th><th>Metric</th><th>Details</th></tr>
+                </thead>
+                <tbody>
+                {% for r in disc_results %}
+                <tr>
+                    <td><code style="font-size:0.8125rem">{{ r.test_name }}</code></td>
+                    <td>{% if r.passed %}<span class="badge badge-pass">Pass</span>{% else %}<span class="badge badge-fail">Fail</span>{% endif %}</td>
+                    <td><span class="badge badge-{{ r.severity }}">{{ r.severity }}</span></td>
+                    <td class="metric-value">{% if r.metric_value is not none %}{{ "%.4f" | format(r.metric_value) }}{% else %}-{% endif %}</td>
+                    <td class="details-text">{{ r.details }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 5. Stability -->
+    {% set stab_results = results | selectattr('category', 'equalto', 'stability') | list %}
+    {% if stab_results %}
+    <div class="section">
+        <div class="section-header">
+            <h2>5. Population Stability</h2>
+        </div>
+        <div class="section-body">
+            <table>
+                <thead>
+                    <tr><th>Test</th><th>Result</th><th>Severity</th><th>PSI</th><th>Details</th></tr>
+                </thead>
+                <tbody>
+                {% for r in stab_results %}
+                <tr>
+                    <td><code style="font-size:0.8125rem">{{ r.test_name }}</code></td>
+                    <td>{% if r.passed %}<span class="badge badge-pass">Pass</span>{% else %}<span class="badge badge-fail">Fail</span>{% endif %}</td>
+                    <td><span class="badge badge-{{ r.severity }}">{{ r.severity }}</span></td>
+                    <td class="metric-value">{% if r.metric_value is not none %}{{ "%.4f" | format(r.metric_value) }}{% else %}-{% endif %}</td>
+                    <td class="details-text">{{ r.details }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 6. Assumptions -->
+    {% set assump_results = results | selectattr('category', 'equalto', 'assumptions') | list %}
+    {% if assump_results %}
+    <div class="section">
+        <div class="section-header">
+            <h2>6. Assumption Tests</h2>
+        </div>
+        <div class="section-body">
+            <table>
+                <thead>
+                    <tr><th>Test</th><th>Result</th><th>Severity</th><th>Metric</th><th>Details</th></tr>
+                </thead>
+                <tbody>
+                {% for r in assump_results %}
+                <tr>
+                    <td><code style="font-size:0.8125rem">{{ r.test_name }}</code></td>
+                    <td>{% if r.passed %}<span class="badge badge-pass">Pass</span>{% else %}<span class="badge badge-fail">Fail</span>{% endif %}</td>
+                    <td><span class="badge badge-{{ r.severity }}">{{ r.severity }}</span></td>
+                    <td class="metric-value">{% if r.metric_value is not none %}{{ "%.4f" | format(r.metric_value) }}{% else %}-{% endif %}</td>
+                    <td class="details-text">{{ r.details }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 7. Regulatory Reference -->
+    <div class="section">
+        <div class="section-header">
+            <h2>7. Regulatory Reference</h2>
+        </div>
+        <div class="section-body">
+            <table>
+                <thead>
+                    <tr><th>Requirement</th><th>Source</th><th>Coverage in this report</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Model inventory and risk classification</td>
+                        <td>PRA SS1/23 Principle 1</td>
+                        <td>Model card - materiality tier {{ card.materiality_tier }}</td>
+                    </tr>
+                    <tr>
+                        <td>Development documentation</td>
+                        <td>PRA SS1/23 Principle 3</td>
+                        <td>Model card - purpose, methodology, limitations</td>
+                    </tr>
+                    <tr>
+                        <td>Independent validation</td>
+                        <td>PRA SS1/23 Principle 4</td>
+                        <td>{% if card.validator_name %}Validator: {{ card.validator_name }}{% else %}Not yet assigned{% endif %}</td>
+                    </tr>
+                    <tr>
+                        <td>Data quality assessment</td>
+                        <td>PRA SS1/23 Principle 4</td>
+                        <td>Section 2 - {{ dq_results | length }} tests</td>
+                    </tr>
+                    <tr>
+                        <td>Outcome analysis (performance)</td>
+                        <td>PRA SS1/23 Principle 4</td>
+                        <td>Section 3 - {{ perf_results | length }} tests</td>
+                    </tr>
+                    <tr>
+                        <td>Proxy discrimination / fair value</td>
+                        <td>FCA Consumer Duty; FCA TR24/2</td>
+                        <td>Section 4 - {{ disc_results | length }} tests</td>
+                    </tr>
+                    <tr>
+                        <td>Population stability monitoring</td>
+                        <td>PRA SS1/23 Principle 5; SS1/24</td>
+                        <td>Section 5 - {{ stab_results | length }} tests</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="report-footer">
+        <span>Generated by insurance-validation | MIT Licence</span>
+        <span>{{ card.model_name }} v{{ card.version }} | {{ generated_date }}</span>
+    </div>
+
+</div>
+</body>
+</html>
