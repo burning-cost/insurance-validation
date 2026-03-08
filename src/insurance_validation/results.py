@@ -19,14 +19,24 @@ class Severity(str, Enum):
     CRITICAL = "critical"
 
 
+class RAGStatus(str, Enum):
+    """RAG (Red-Amber-Green) overall validation status."""
+
+    GREEN = "green"
+    AMBER = "amber"
+    RED = "red"
+
+
 class TestCategory(str, Enum):
     """Which section of the validation report this result belongs to."""
 
     DATA_QUALITY = "data_quality"
     PERFORMANCE = "performance"
+    FAIRNESS = "fairness"
     DISCRIMINATION = "discrimination"
     STABILITY = "stability"
     ASSUMPTIONS = "assumptions"
+    MONITORING = "monitoring"
 
 
 @dataclass
@@ -76,3 +86,26 @@ class TestResult:
             "severity": self.severity.value,
             "extra": self.extra,
         }
+
+
+def compute_rag_status(results: list[TestResult]) -> RAGStatus:
+    """
+    Compute the overall RAG status from a list of TestResults.
+
+    RED: any CRITICAL failure.
+    AMBER: any WARNING failure, no CRITICAL.
+    GREEN: all tests pass or INFO only.
+    """
+    has_critical = any(
+        not r.passed and r.severity == Severity.CRITICAL
+        for r in results
+    )
+    has_warning = any(
+        not r.passed and r.severity == Severity.WARNING
+        for r in results
+    )
+    if has_critical:
+        return RAGStatus.RED
+    if has_warning:
+        return RAGStatus.AMBER
+    return RAGStatus.GREEN

@@ -1,402 +1,228 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # insurance-validation: Full Workflow Demo
+# MAGIC # insurance-validation v0.2.0: PRA SS1/23 Compliant Model Validation
 # MAGIC
-# MAGIC This notebook demonstrates the complete model validation workflow on synthetic
-# MAGIC motor insurance data. It covers:
+# MAGIC This notebook demonstrates the full validation workflow for a synthetic
+# MAGIC UK motor insurance frequency model. It covers every section of a
+# MAGIC PRA SS1/23 aligned validation report:
 # MAGIC
-# MAGIC 1. Generating synthetic training and holdout datasets
-# MAGIC 2. Fitting a GLM frequency model
-# MAGIC 3. Running data quality checks
-# MAGIC 4. Validating model performance (Gini, A/E, lift charts)
-# MAGIC 5. Running discrimination / proxy checks (FCA Consumer Duty)
-# MAGIC 6. Measuring population stability (PSI)
-# MAGIC 7. Generating the HTML validation report
+# MAGIC 1. Executive Summary with RAG status
+# MAGIC 2. Model Card and Governance
+# MAGIC 3. Data Quality Assessment
+# MAGIC 4. Model Development Documentation
+# MAGIC 5. Performance Validation (Gini + CI, A/E + Poisson CI, double-lift, HL test)
+# MAGIC 6. Fairness and Discrimination (FCA Consumer Duty / TR24/2)
+# MAGIC 7. Population Stability (PSI, feature drift)
+# MAGIC 8. Feature Importance (optional SHAP)
+# MAGIC 9. Monitoring Plan and Sign-Off
 
 # COMMAND ----------
-
-# MAGIC %pip install insurance-validation polars scikit-learn numpy jinja2 pydantic
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 1. Generate synthetic motor insurance data
+# MAGIC %pip install insurance-validation scipy polars pydantic jinja2 scikit-learn numpy -q
 
 # COMMAND ----------
-
 import numpy as np
 import polars as pl
 from datetime import date
+import tempfile
+from pathlib import Path
 
-rng = np.random.default_rng(42)
-
-N_TRAIN = 20_000
-N_HOLDOUT = 5_000
-
-# --- Features ---
-driver_age = rng.integers(18, 80, size=N_TRAIN + N_HOLDOUT).astype(float)
-vehicle_age = rng.integers(0, 20, size=N_TRAIN + N_HOLDOUT).astype(float)
-annual_mileage = rng.lognormal(9.0, 0.5, size=N_TRAIN + N_HOLDOUT)
-region = rng.choice(["London", "South East", "Midlands", "North", "Scotland"],
-                    size=N_TRAIN + N_HOLDOUT)
-vehicle_value = rng.lognormal(9.5, 0.6, size=N_TRAIN + N_HOLDOUT)
-exposure = rng.uniform(0.1, 1.0, size=N_TRAIN + N_HOLDOUT)
-
-# Age band for discrimination analysis
-age_band = np.where(driver_age < 25, "17-24",
-           np.where(driver_age < 40, "25-39",
-           np.where(driver_age < 60, "40-59", "60+")))
-
-# Income proxy (correlated with region for testing proxy detection)
-income_proxy = np.where(
-    np.isin(region, ["London", "South East"]),
-    rng.uniform(50_000, 120_000, size=N_TRAIN + N_HOLDOUT),
-    rng.uniform(20_000, 60_000, size=N_TRAIN + N_HOLDOUT),
+from insurance_validation import (
+    ModelValidationReport,
+    ModelCard,
+    PerformanceReport,
+    DataQualityReport,
+    DiscriminationReport,
+    StabilityReport,
+    ReportGenerator,
 )
 
-# --- True frequency (ground truth) ---
-# Log-linear model with realistic relativities
-log_base_rate = -3.0
-log_freq = (
-    log_base_rate
-    + 0.04 * np.maximum(25 - driver_age, 0)   # young driver loading
-    + 0.02 * vehicle_age
-    + 0.25 * np.log(annual_mileage / 10_000)
-    + np.where(region == "London", 0.3,
-      np.where(region == "South East", 0.15, 0.0))
-    + rng.normal(0, 0.1, size=N_TRAIN + N_HOLDOUT)  # unexplained noise
-)
-true_frequency = np.exp(log_freq)
-claim_count = rng.poisson(true_frequency * exposure).astype(float)
+print("insurance-validation imported OK")
 
-# --- Build Polars DataFrames ---
-all_data = pl.DataFrame({
-    "driver_age": driver_age,
-    "vehicle_age": vehicle_age,
-    "annual_mileage": annual_mileage,
-    "region": region,
-    "vehicle_value": vehicle_value,
-    "age_band": age_band,
-    "income_proxy": income_proxy,
-    "exposure": exposure,
-    "claim_count": claim_count,
-    "true_frequency": true_frequency,
+# COMMAND ----------
+# MAGIC %md ## 1. Synthetic data: UK motor frequency model
+
+# COMMAND ----------
+rng = np.random.default_rng(2024)
+N_TRAIN = 10_000
+N_VAL = 3_000
+
+driver_age = rng.integers(17, 80, N_TRAIN + N_VAL).astype(float)
+vehicle_age = rng.integers(0, 20, N_TRAIN + N_VAL).astype(float)
+area = rng.choice(["Urban", "Rural", "Suburban"], N_TRAIN + N_VAL, p=[0.45, 0.25, 0.30])
+ncd_years = rng.integers(0, 9, N_TRAIN + N_VAL).astype(float)
+tenure = rng.integers(0, 7, N_TRAIN + N_VAL).astype(int)
+segment = rng.choice(["Standard", "Enhanced", "Premium"], N_TRAIN + N_VAL, p=[0.6, 0.3, 0.1])
+
+log_mu = (
+    -3.0
+    + 0.015 * (driver_age - 35)
+    - 0.005 * (driver_age - 35) ** 2 / 100
+    + 0.03 * vehicle_age
+    + np.where(area == "Urban", 0.3, 0.0)
+    + np.where(area == "Suburban", 0.1, 0.0)
+    - 0.05 * ncd_years
+)
+mu_true = np.exp(log_mu)
+exposure = rng.uniform(0.25, 1.0, N_TRAIN + N_VAL)
+claim_count = rng.poisson(mu_true * exposure)
+
+new_pred = mu_true * np.exp(rng.normal(0, 0.08, N_TRAIN + N_VAL))
+old_pred = np.exp(-3.0 + 0.015 * (driver_age - 35) - 0.005 * (driver_age - 35)**2/100
+                  + 0.02 * vehicle_age - 0.04 * ncd_years + rng.normal(0, 0.2, N_TRAIN + N_VAL))
+
+y_train = claim_count[:N_TRAIN].astype(float)
+y_val = claim_count[N_TRAIN:].astype(float)
+pred_train = new_pred[:N_TRAIN]
+pred_val = new_pred[N_TRAIN:]
+pred_val_old = old_pred[N_TRAIN:]
+exp_train = exposure[:N_TRAIN]
+exp_val = exposure[N_TRAIN:]
+
+X_val = pl.DataFrame({
+    "driver_age": driver_age[N_TRAIN:].tolist(),
+    "vehicle_age": vehicle_age[N_TRAIN:].tolist(),
+    "area": area[N_TRAIN:].tolist(),
+    "ncd_years": ncd_years[N_TRAIN:].tolist(),
+    "tenure": tenure[N_TRAIN:].tolist(),
+    "segment": segment[N_TRAIN:].tolist(),
+})
+X_train = pl.DataFrame({
+    "driver_age": driver_age[:N_TRAIN].tolist(),
+    "vehicle_age": vehicle_age[:N_TRAIN].tolist(),
+    "area": area[:N_TRAIN].tolist(),
+    "ncd_years": ncd_years[:N_TRAIN].tolist(),
+    "tenure": tenure[:N_TRAIN].tolist(),
+    "segment": segment[:N_TRAIN].tolist(),
 })
 
-# Split
-train_df = all_data[:N_TRAIN]
-holdout_df = all_data[N_TRAIN:]
-
-print(f"Training rows: {len(train_df):,}")
-print(f"Holdout rows:  {len(holdout_df):,}")
-print(f"Training claim frequency: {train_df['claim_count'].mean() / train_df['exposure'].mean():.4f}")
-print(f"Holdout claim frequency:  {holdout_df['claim_count'].mean() / holdout_df['exposure'].mean():.4f}")
+print(f"Train: {N_TRAIN:,} rows | Val: {N_VAL:,} rows")
+print(f"Val claim rate: {y_val.sum():.0f} claims / {exp_val.sum():.0f} years = {y_val.sum()/exp_val.sum():.4f}")
 
 # COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 2. Fit a GLM frequency model
+# MAGIC %md ## 2. Model Card
 
 # COMMAND ----------
-
-from sklearn.linear_model import PoissonRegressor
-from sklearn.preprocessing import StandardScaler
-import warnings
-
-# Encode features for sklearn
-def prepare_features(df: pl.DataFrame) -> np.ndarray:
-    region_dummies = {
-        f"region_{r}": (df["region"] == r).cast(pl.Float64).to_numpy()
-        for r in ["London", "South East", "Midlands", "North"]  # Scotland is reference
-    }
-    X = np.column_stack([
-        df["driver_age"].to_numpy(),
-        df["vehicle_age"].to_numpy(),
-        np.log(df["annual_mileage"].to_numpy()),
-        *region_dummies.values(),
-    ])
-    return X
-
-X_train = prepare_features(train_df)
-y_train = train_df["claim_count"].to_numpy() / train_df["exposure"].to_numpy()
-w_train = train_df["exposure"].to_numpy()
-
-X_holdout = prepare_features(holdout_df)
-
-# Fit Poisson GLM (exposure-weighted)
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_holdout_scaled = scaler.transform(X_holdout)
-
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    glm = PoissonRegressor(alpha=0, max_iter=500)
-    glm.fit(X_train_scaled, y_train, sample_weight=w_train)
-
-# Predictions (frequency per unit exposure)
-y_pred_train = glm.predict(X_train_scaled)
-y_pred_holdout = glm.predict(X_holdout_scaled)
-
-print(f"Train mean predicted frequency:   {y_pred_train.mean():.4f}")
-print(f"Holdout mean predicted frequency: {y_pred_holdout.mean():.4f}")
-print(f"Holdout mean actual frequency:    {(holdout_df['claim_count'].to_numpy() / holdout_df['exposure'].to_numpy()).mean():.4f}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3. Define the model card
-
-# COMMAND ----------
-
-from insurance_validation import ModelCard
-
 card = ModelCard(
-    model_name="Motor TPPD Claim Frequency",
-    version="1.0.0",
+    name="Motor Third-Party Property Damage Frequency",
+    version="3.2.0",
     purpose=(
-        "Estimate expected claim frequency (claims per earned exposure year) "
-        "for private motor third-party property damage. Used in policy pricing."
+        "Predict claim frequency (claims per policy year) for private motor TPPD. "
+        "Used in underwriting pricing to derive the risk premium component."
     ),
-    intended_use=(
-        "Underwriting pricing for private motor policies. "
-        "Not for use in claims reserving, capital modelling, or reinsurance pricing."
-    ),
-    developer="Pricing Analytics Team",
-    development_date=date(2024, 6, 1),
-    limitations=(
-        "Trained on 2018-2023 underwriting years. Performance has not been validated "
-        "for vehicles older than 15 years (less than 2% of portfolio). "
-        "Young driver (<21) relativities are based on limited data and should be "
-        "reviewed against industry benchmarks."
-    ),
-    materiality_tier=2,
+    methodology="CatBoost gradient boosting, Poisson log-loss objective, 500 trees",
+    target="claim_count",
+    features=["driver_age", "vehicle_age", "area", "ncd_years"],
+    limitations=[
+        "Performance degrades for vehicles over 15 years old (sparse data)",
+        "No telematics data in current specification",
+        "Trained on 2020-2024 data; pre-2020 regime not represented",
+    ],
+    owner="Personal Lines Pricing Team",
     approved_by=["Jane Smith - Chief Actuary", "Model Risk Committee"],
-    variables=["driver_age", "vehicle_age", "annual_mileage", "region"],
-    target_variable="claim_count",
-    model_type="GLM",
+    development_date=date(2024, 10, 1),
+    materiality_tier=2,
+    model_type="GBM",
     distribution_family="Poisson",
-    validator_name="Independent Validation Unit",
-    validation_date=date(2024, 9, 1),
+    validator_name="Independent Actuarial Services Ltd",
+    validation_date=date(2025, 1, 15),
     alternatives_considered=(
-        "GBM (LightGBM) was evaluated and achieved Gini 0.41 vs GLM 0.35. "
-        "GLM was selected for regulatory interpretability and stable relativities. "
-        "The GBM will be reconsidered if GLM Gini falls below 0.25."
+        "GLM (Poisson) considered but rejected due to lower Gini (0.31 vs 0.44). "
+        "Neural network rejected due to interpretability requirements."
     ),
     monitoring_frequency="Quarterly",
+    outstanding_issues=[
+        "Vehicle age >15yr performance requires banding review (Q2 2025)",
+        "Telematics data integration planned for v4.0",
+    ],
+    monitoring_owner="Actuarial Risk & Analytics Team",
+    monitoring_triggers={
+        "psi_score": 0.25,
+        "ae_ratio_deviation": 0.10,
+        "gini_drop": 0.05,
+    },
 )
 
-print(f"Model: {card.model_name} v{card.version}")
-print(f"Tier:  {card.materiality_tier}")
-print(f"Variables: {', '.join(card.variables)}")
+print(card.summary())
 
 # COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Data quality checks
+# MAGIC %md ## 3. Full validation report via high-level API
 
 # COMMAND ----------
-
-from insurance_validation import DataQualityReport
-
-# Add some artificial nulls to demonstrate the check
-train_with_nulls = train_df.with_columns([
-    pl.when(pl.int_range(pl.len()) % 50 == 0)
-    .then(None)
-    .otherwise(pl.col("annual_mileage"))
-    .alias("annual_mileage")
-])
-
-dq = DataQualityReport(train_with_nulls, dataset_name="Motor training 2018-2023")
-
-dq_results = [
-    dq.summary_statistics(),
-    *dq.missing_value_analysis(threshold=0.05),
-    *dq.outlier_detection(method="iqr", iqr_multiplier=3.0),
-    *dq.cardinality_check(max_categories=20),
-]
-
-print(f"\nData quality tests: {len(dq_results)}")
-failures = [r for r in dq_results if not r.passed]
-print(f"Failures: {len(failures)}")
-for r in failures:
-    print(f"  - {r.test_name}: {r.details[:80]}...")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 5. Performance validation
-
-# COMMAND ----------
-
-from insurance_validation import PerformanceReport
-
-y_true = holdout_df["claim_count"].to_numpy()
-exposure = holdout_df["exposure"].to_numpy()
-
-perf = PerformanceReport(
-    y_true=y_true,
-    y_pred=y_pred_holdout,
-    exposure=exposure,
-    model_name="Motor TPPD GLM v1.0",
+report = ModelValidationReport(
+    model_card=card,
+    y_val=y_val,
+    y_pred_val=pred_val,
+    exposure_val=exp_val,
+    y_train=y_train,
+    y_pred_train=pred_train,
+    exposure_train=exp_train,
+    X_train=X_train,
+    X_val=X_val,
+    incumbent_pred_val=pred_val_old,
+    tenure_col="tenure",
+    segment_col="segment",
+    monitoring_owner=card.monitoring_owner,
+    monitoring_triggers=card.monitoring_triggers,
 )
 
-perf_results = [
-    perf.gini_coefficient(min_acceptable=0.2),
-    perf.actual_vs_expected(n_bands=10),
-    *perf.lift_chart(n_bands=10),
-    perf.lorenz_curve(),
-    perf.calibration_plot_data(),
-]
+results = report.run()
+rag = report.get_rag_status()
 
-gini_result = next(r for r in perf_results if r.test_name == "gini_coefficient")
-ae_result = next(r for r in perf_results if r.test_name == "actual_vs_expected")
-print(f"Gini coefficient: {gini_result.metric_value:.4f} ({'PASS' if gini_result.passed else 'FAIL'})")
-print(f"A/E ratio:        {ae_result.metric_value:.4f} ({'PASS' if ae_result.passed else 'FAIL'})")
+print(f"RAG Status: {rag.value.upper()}")
+print(f"Total tests: {len(results)}")
+print(f"Passed: {sum(1 for r in results if r.passed)}")
+print(f"Failed: {sum(1 for r in results if not r.passed)}")
+print(f"Critical: {sum(1 for r in results if not r.passed and r.severity.value == 'critical')}")
+print(f"Warnings: {sum(1 for r in results if not r.passed and r.severity.value == 'warning')}")
 
 # COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 6. Discrimination checks (FCA Consumer Duty)
+# MAGIC %md ## 4. Performance highlights
 
 # COMMAND ----------
+gini_ci = next(r for r in results if r.test_name == "gini_with_ci")
+ae_ci = next(r for r in results if r.test_name == "ae_poisson_ci")
+hl = next(r for r in results if r.test_name == "hosmer_lemeshow")
+dl = next(r for r in results if r.test_name == "double_lift")
 
-from insurance_validation import DiscriminationReport
-
-disc = DiscriminationReport(
-    df=holdout_df,
-    predictions=y_pred_holdout,
-)
-
-disc_results = [
-    *disc.proxy_correlation(
-        features=["vehicle_value", "region"],
-        protected_chars=["income_proxy"],
-        threshold=0.3,
-    ),
-    disc.disparate_impact_ratio(
-        group_col="age_band",
-        threshold=0.8,
-    ),
-    disc.subgroup_outcome_analysis(
-        group_col="age_band",
-        outcome_col="claim_count",
-    ),
-    disc.subgroup_outcome_analysis(
-        group_col="region",
-        outcome_col="claim_count",
-    ),
-]
-
-print(f"\nDiscrimination tests: {len(disc_results)}")
-for r in disc_results:
-    status = "PASS" if r.passed else "FAIL"
-    metric = f"{r.metric_value:.4f}" if r.metric_value is not None else "N/A"
-    print(f"  {status} | {r.test_name}: {metric}")
+print("=== Performance Summary ===")
+print(f"Gini: {gini_ci.metric_value:.4f}  (95% bootstrap CI: [{gini_ci.extra['ci_lower']:.4f}, {gini_ci.extra['ci_upper']:.4f}])")
+print(f"A/E:  {ae_ci.metric_value:.4f}  (Poisson 95% CI: [{ae_ci.extra['ci_lower']:.4f}, {ae_ci.extra['ci_upper']:.4f}])")
+print(f"H-L test: p-value = {hl.extra['p_value']:.4f}  ({'PASS' if hl.passed else 'FAIL'})")
+print(f"Double-lift: new MAE={dl.extra['new_model_mae']:.5f}, incumbent MAE={dl.extra['incumbent_mae']:.5f}  ({'New model wins' if dl.passed else 'Incumbent wins'})")
 
 # COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 7. Population stability (PSI)
+# MAGIC %md ## 5. Renewal cohort and sub-segment A/E
 
 # COMMAND ----------
+disc = DiscriminationReport(df=X_val)
 
-from insurance_validation import StabilityReport
+renewal_result = disc.renewal_cohort_ae(y_true=y_val, y_pred=pred_val, tenure_col="tenure")
+print("Renewal cohort A/E by tenure band:")
+for band in renewal_result.extra["bands"]:
+    ae_str = f"{band['ae_ratio']:.4f}" if band["ae_ratio"] is not None else "N/A"
+    status = "OK" if band["in_range"] else "FLAG"
+    print(f"  {band['band']:>5}: n={band['n']:>4}, A/E={ae_str} [{status}]")
 
-stab = StabilityReport()
-
-stab_results = [
-    stab.psi(
-        reference=y_pred_train,
-        current=y_pred_holdout,
-        n_bins=10,
-        label="predicted_frequency",
-    ),
-    *stab.feature_drift(
-        reference_df=train_df,
-        current_df=holdout_df,
-        features=["driver_age", "vehicle_age", "annual_mileage", "region"],
-        n_bins=10,
-    ),
-]
-
-print(f"\nStability tests: {len(stab_results)}")
-for r in stab_results:
-    status = "PASS" if r.passed else "FAIL"
-    metric = f"{r.metric_value:.4f}" if r.metric_value is not None else "N/A"
-    print(f"  {status} | {r.test_name}: PSI = {metric}")
+seg_result = disc.subsegment_ae(y_true=y_val, y_pred=pred_val, segment_col="segment")
+print(f"\nSub-segment A/E ({'PASS' if seg_result.passed else 'FAIL'}):")
+for seg in seg_result.extra["segments"]:
+    ae_str = f"{seg['ae_ratio']:.4f}" if seg["ae_ratio"] is not None else "N/A"
+    print(f"  {seg['segment']:>10}: n={seg['n']:>4}, A/E={ae_str}")
 
 # COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 8. Generate validation report
+# MAGIC %md ## 6. Write HTML and JSON reports
 
 # COMMAND ----------
+with tempfile.TemporaryDirectory() as tmpdir:
+    html_path = Path(tmpdir) / "motor_frequency_validation.html"
+    json_path = Path(tmpdir) / "motor_frequency_validation.json"
+    report.generate(html_path)
+    report.to_json(json_path)
+    import shutil
+    shutil.copy(html_path, "/tmp/motor_frequency_validation.html")
+    shutil.copy(json_path, "/tmp/motor_frequency_validation.json")
+    print(f"HTML: {html_path.stat().st_size:,} bytes -> /tmp/motor_frequency_validation.html")
+    print(f"JSON: {json_path.stat().st_size:,} bytes -> /tmp/motor_frequency_validation.json")
 
-from insurance_validation import ReportGenerator
-
-all_results = dq_results + perf_results + disc_results + stab_results
-
-total = len(all_results)
-passed = sum(1 for r in all_results if r.passed)
-failed = total - passed
-
-print(f"Total tests: {total}")
-print(f"Passed:      {passed}")
-print(f"Failed:      {failed}")
-
-gen = ReportGenerator(card, all_results, generated_date=date(2024, 9, 1))
-
-# Write HTML report
-html_path = "/tmp/motor_tppd_validation_2024.html"
-json_path = "/tmp/motor_tppd_validation_2024.json"
-
-gen.write_html(html_path)
-gen.write_json(json_path)
-
-print(f"\nReport written to: {html_path}")
-print(f"JSON sidecar:      {json_path}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 9. Display report summary
-
-# COMMAND ----------
-
-import json
-
-with open(json_path) as f:
-    report_data = json.load(f)
-
-summary = report_data["summary"]
-print("Report summary:")
-print(f"  Total tests:  {summary['total_tests']}")
-print(f"  Passed:       {summary['passed']}")
-print(f"  Failed:       {summary['failed']}")
-print(f"  Critical:     {summary['critical']}")
-print(f"  Warnings:     {summary['warnings']}")
-
-# Show per-category breakdown
-from collections import Counter
-cats = Counter(r["category"] for r in report_data["results"])
-print("\nTests by category:")
-for cat, count in sorted(cats.items()):
-    cat_results = [r for r in report_data["results"] if r["category"] == cat]
-    cat_pass = sum(1 for r in cat_results if r["passed"])
-    print(f"  {cat:20s}: {count:3d} tests, {cat_pass} passed")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Summary
-# MAGIC
-# MAGIC This demo covered the full validation workflow:
-# MAGIC
-# MAGIC - **Data quality**: {N_TRAIN:,} training rows checked for missing values, outliers, and cardinality
-# MAGIC - **Performance**: Gini coefficient (exposure-weighted), A/E ratio, lift chart on {N_HOLDOUT:,} holdout policies
-# MAGIC - **Discrimination**: Proxy correlation (vehicle value vs. income proxy), disparate impact by age band, subgroup outcomes by region
-# MAGIC - **Stability**: PSI on predicted frequency and all 4 model features
-# MAGIC - **Report**: Self-contained HTML + JSON sidecar written to /tmp/
-# MAGIC
-# MAGIC To use in production: replace synthetic data with your actual training/holdout datasets,
-# MAGIC update the ModelCard metadata, and schedule the notebook quarterly per your monitoring plan.
+print(f"Run ID: {report._run_id}")
+print("\n=== Demo complete ===")

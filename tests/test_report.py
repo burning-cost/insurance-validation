@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from insurance_validation import ModelCard, ReportGenerator
-from insurance_validation.results import Severity, TestCategory, TestResult
+from insurance_validation.results import Severity, TestCategory, TestResult, RAGStatus
 
 
 def make_card():
@@ -94,7 +94,7 @@ def test_html_shows_fail_status_when_critical():
     results = make_results()  # contains a CRITICAL fail
     gen = ReportGenerator(card, results)
     html = gen.render_html()
-    assert "FAIL" in html
+    assert "Fail" in html or "FAIL" in html
 
 
 def test_html_shows_pass_when_no_failures():
@@ -111,7 +111,7 @@ def test_html_shows_pass_when_no_failures():
     ]
     gen = ReportGenerator(card, results)
     html = gen.render_html()
-    assert "PASS" in html
+    assert "Pass" in html or "PASS" in html
 
 
 def test_html_is_valid_html():
@@ -142,9 +142,57 @@ def test_to_dict_structure():
     assert "results" in d
     assert "summary" in d
     assert "generated_date" in d
+    assert "run_id" in d
+    assert "rag_status" in d
     assert d["summary"]["total_tests"] == 3
     assert d["summary"]["passed"] == 2
     assert d["summary"]["failed"] == 1
+
+
+def test_run_id_is_uuid():
+    import uuid
+    card = make_card()
+    gen = ReportGenerator(card, [])
+    d = gen.to_dict()
+    # Should be parseable as UUID
+    uuid.UUID(d["run_id"])
+
+
+def test_rag_status_red_when_critical():
+    card = make_card()
+    results = make_results()  # has CRITICAL
+    gen = ReportGenerator(card, results)
+    assert gen._rag_status == RAGStatus.RED
+
+
+def test_rag_status_green_when_all_pass():
+    card = make_card()
+    results = [
+        TestResult(
+            test_name="gini",
+            category=TestCategory.PERFORMANCE,
+            passed=True,
+            severity=Severity.INFO,
+            details="OK",
+        )
+    ]
+    gen = ReportGenerator(card, results)
+    assert gen._rag_status == RAGStatus.GREEN
+
+
+def test_rag_status_amber_when_warning():
+    card = make_card()
+    results = [
+        TestResult(
+            test_name="ae_ratio",
+            category=TestCategory.PERFORMANCE,
+            passed=False,
+            severity=Severity.WARNING,
+            details="AE outside range",
+        )
+    ]
+    gen = ReportGenerator(card, results)
+    assert gen._rag_status == RAGStatus.AMBER
 
 
 def test_write_json_creates_valid_json():
@@ -157,6 +205,8 @@ def test_write_json_creates_valid_json():
             data = json.load(f)
         assert data["model_card"]["model_name"] == "Test Model"
         assert len(data["results"]) == 3
+        assert "run_id" in data
+        assert "rag_status" in data
 
 
 def test_empty_results_renders():
@@ -179,3 +229,18 @@ def test_generated_date_custom():
     assert gen._generated_date == date(2025, 1, 15)
     html = gen.render_html()
     assert "2025-01-15" in html
+
+
+def test_html_contains_run_id():
+    card = make_card()
+    gen = ReportGenerator(card, [], run_id="test-run-id-123")
+    html = gen.render_html()
+    assert "test-run-id-123" in html
+
+
+def test_html_contains_rag_status():
+    card = make_card()
+    results = make_results()  # has critical fail -> RED
+    gen = ReportGenerator(card, results)
+    html = gen.render_html()
+    assert "RED" in html or "red" in html

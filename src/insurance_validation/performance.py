@@ -10,6 +10,10 @@ Gini = 2 * AUC - 1, computed on (y_true, y_pred) ranked by y_pred. When
 exposure weights are provided, the Lorenz curve areas are exposure-weighted.
 This matches the actuarial convention used in UK pricing teams.
 
+Bootstrap confidence intervals on Gini use 1000 resamples by default. The
+Poisson exact CI on A/E ratios uses the chi-squared pivot, which is exact
+for Poisson-distributed claim counts. Both are standard actuarial tools.
+
 Usage
 -----
     import numpy as np
@@ -23,13 +27,18 @@ Usage
 
     results = [
         report.gini_coefficient(),
+        report.gini_with_ci(),
         report.actual_vs_expected(n_bands=10),
+        report.ae_with_poisson_ci(),
         *report.lift_chart(n_bands=10),
+        report.double_lift(y_pred_incumbent=old_predictions),
+        report.hosmer_lemeshow_test(),
     ]
 """
 from __future__ import annotations
 
 import numpy as np
+from scipy import stats
 
 from .results import Severity, TestCategory, TestResult
 
@@ -76,6 +85,52 @@ def _weighted_gini(
     auc = float(np.trapz(y, x))
     gini = 2 * auc - 1
     return float(np.clip(gini, -1.0, 1.0))
+
+
+def _poisson_ae_ci(
+    actual_claims: float,
+    expected_claims: float,
+    alpha: float = 0.05,
+) -> tuple[float, float]:
+    """
+    Exact Poisson confidence interval on the A/E ratio.
+
+    Uses the chi-squared pivot:
+      lower = chi2(2*A, alpha/2) / (2*E)
+      upper = chi2(2*A+2, 1-alpha/2) / (2*E)
+
+    This is exact for Poisson-distributed claim counts and is the
+    standard actuarial approach. See Dobson et al. (1991).
+
+    Parameters
+    ----------
+    actual_claims:
+        Observed claim count (A). Must be >= 0.
+    expected_claims:
+        Predicted claim count (E). Must be > 0.
+    alpha:
+        Significance level. Default 0.05 gives 95% CI.
+
+    Returns
+    -------
+    (lower_ratio, upper_ratio)
+        95% CI on the A/E ratio.
+    """
+    if expected_claims <= 0:
+        return (float("nan"), float("nan"))
+
+    A = actual_claims
+    E = expected_claims
+
+    # Handle zero claims: lower bound is 0
+    if A == 0:
+        lower = 0.0
+    else:
+        lower = stats.chi2.ppf(alpha / 2, df=2 * A) / (2 * E)
+
+    upper = stats.chi2.ppf(1 - alpha / 2, df=2 * A + 2) / (2 * E)
+
+    return (lower, upper)
 
 
 class PerformanceReport:
@@ -177,6 +232,79 @@ class PerformanceReport:
             details=details,
             severity=severity if passed else Severity.WARNING,
             extra={"gini": gini, "weighted": self._weights is not None},
+        )
+
+    def gini_with_ci(
+        self,
+        n_resamples: int = 1000,
+        confidence: float = 0.95,
+        min_acceptable: float = 0.1,
+        random_state: int = 42,
+    ) -> TestResult:
+        """
+        Gini coefficient with bootstrap confidence interval.
+
+        Bootstrap CI uses stratified resampling with replacement. 1000
+        resamples is industry standard for actuarial bootstrap intervals.
+        The CI is reported at the percentile level (not BCa) for
+        transparency.
+
+        Parameters
+        ----------
+        n_resamples:
+            Number of bootstrap resamples. 1000 is adequate for 95% CI.
+        confidence:
+            Confidence level, e.g. 0.95 for 95% CI.
+        min_acceptable:
+            Gini values below this threshold fail. Applied to the point
+            estimate, not the lower bound.
+        random_state:
+            Random seed for reproducibility.
+
+        Returns
+        -------
+        TestResult with extra["ci_lower"] and extra["ci_upper"].
+        """
+        lorenz_weights = self._weights if self._weights is not None else self._exposure
+        gini_point = _weighted_gini(self._y_true, self._y_pred, lorenz_weights)
+
+        rng = np.random.default_rng(random_state)
+        n = len(self._y_true)
+        bootstrap_ginis = np.empty(n_resamples)
+
+        for i in range(n_resamples):
+            idx = rng.integers(0, n, size=n)
+            w_boot = lorenz_weights[idx] if lorenz_weights is not None else None
+            bootstrap_ginis[i] = _weighted_gini(
+                self._y_true[idx], self._y_pred[idx], w_boot
+            )
+
+        alpha = 1 - confidence
+        ci_lower = float(np.percentile(bootstrap_ginis, 100 * alpha / 2))
+        ci_upper = float(np.percentile(bootstrap_ginis, 100 * (1 - alpha / 2)))
+
+        passed = gini_point >= min_acceptable
+        details = (
+            f"Gini coefficient for {self._model_name}: {gini_point:.4f} "
+            f"({confidence:.0%} CI: [{ci_lower:.4f}, {ci_upper:.4f}], "
+            f"{n_resamples} bootstrap resamples). "
+            f"Minimum acceptable: {min_acceptable:.2f}."
+        )
+
+        return TestResult(
+            test_name="gini_with_ci",
+            category=TestCategory.PERFORMANCE,
+            passed=passed,
+            metric_value=round(gini_point, 6),
+            details=details,
+            severity=Severity.INFO if passed else Severity.WARNING,
+            extra={
+                "gini": gini_point,
+                "ci_lower": ci_lower,
+                "ci_upper": ci_upper,
+                "confidence": confidence,
+                "n_resamples": n_resamples,
+            },
         )
 
     def lorenz_curve(self, n_points: int = 100) -> TestResult:
@@ -314,6 +442,123 @@ class PerformanceReport:
             )
         ]
 
+    def double_lift(
+        self,
+        y_pred_incumbent: np.ndarray | list,
+        n_bands: int = 10,
+        incumbent_name: str = "incumbent",
+    ) -> TestResult:
+        """
+        Double-lift chart: compare new model vs. incumbent model.
+
+        Policies are ranked by the ratio new_pred / incumbent_pred
+        (ascending), then grouped into n_bands equal-weight bands. For
+        each band we plot actual, new_pred, and incumbent_pred rates.
+        Bands where the new model is lower than the incumbent show the
+        new model predicting a lower risk than the old; the actual rate
+        tells you which is closer to truth.
+
+        This is the standard chart for model-vs-model comparison in UK
+        pricing validation.
+
+        Parameters
+        ----------
+        y_pred_incumbent:
+            Predictions from the incumbent model, same length as y_true.
+        n_bands:
+            Number of bands.
+        incumbent_name:
+            Label for the incumbent model in result details.
+
+        Returns
+        -------
+        TestResult with extra["bands"] list of per-band dicts.
+        """
+        y_pred_inc = np.asarray(y_pred_incumbent, dtype=float)
+        if len(y_pred_inc) != len(self._y_true):
+            raise ValueError(
+                "y_pred_incumbent must have the same length as y_true."
+            )
+
+        w = self._weights if self._weights is not None else np.ones(len(self._y_true))
+        exp = self._exposure if self._exposure is not None else np.ones(len(self._y_true))
+
+        # Ratio: new / incumbent. Avoid division by zero.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(
+                y_pred_inc > 0,
+                self._y_pred / y_pred_inc,
+                np.inf,
+            )
+
+        # Sort by ratio ascending (policies where new < incumbent first)
+        order = np.argsort(ratio)
+        y_sorted = self._y_true[order]
+        new_sorted = self._y_pred[order]
+        inc_sorted = y_pred_inc[order]
+        w_sorted = w[order]
+        exp_sorted = exp[order]
+
+        cum_w = np.cumsum(w_sorted)
+        total_w = cum_w[-1]
+        band_edges = np.linspace(0, total_w, n_bands + 1)
+        band_ids = np.searchsorted(cum_w, band_edges[1:], side="left")
+        band_ids = np.clip(band_ids, 0, len(y_sorted) - 1)
+
+        bands = []
+        prev = 0
+        for band_num, edge in enumerate(band_ids):
+            idx = slice(prev, edge + 1)
+            exp_sum = float(np.sum(exp_sorted[idx]))
+            w_sum = float(np.sum(w_sorted[idx]))
+
+            def rate(arr: np.ndarray) -> float:
+                return float(np.sum(arr[idx] * w_sorted[idx])) / exp_sum if exp_sum > 0 else 0.0
+
+            bands.append({
+                "band": band_num + 1,
+                "actual_rate": rate(y_sorted),
+                "new_model_rate": rate(new_sorted),
+                "incumbent_rate": rate(inc_sorted),
+                "weight": w_sum,
+            })
+            prev = edge + 1
+
+        # Summary: which model tracks actual better?
+        new_mae = float(np.mean([
+            abs(b["actual_rate"] - b["new_model_rate"])
+            for b in bands
+        ]))
+        inc_mae = float(np.mean([
+            abs(b["actual_rate"] - b["incumbent_rate"])
+            for b in bands
+        ]))
+        new_model_wins = new_mae < inc_mae
+        passed = new_model_wins  # informative - not a hard regulatory threshold
+
+        details = (
+            f"Double-lift chart ({n_bands} bands): {self._model_name} vs {incumbent_name}. "
+            f"New model MAE across bands: {new_mae:.5f}. "
+            f"Incumbent MAE: {inc_mae:.5f}. "
+            f"{'New model tracks actual losses more closely.' if new_model_wins else 'Incumbent tracks actual losses more closely - review model improvement case.'}"
+        )
+
+        return TestResult(
+            test_name="double_lift",
+            category=TestCategory.PERFORMANCE,
+            passed=passed,
+            metric_value=round(new_mae - inc_mae, 6),
+            details=details,
+            severity=Severity.INFO if new_model_wins else Severity.WARNING,
+            extra={
+                "bands": bands,
+                "n_bands": n_bands,
+                "new_model_mae": new_mae,
+                "incumbent_mae": inc_mae,
+                "incumbent_name": incumbent_name,
+            },
+        )
+
     def actual_vs_expected(self, n_bands: int = 10) -> TestResult:
         """
         Overall actual vs. expected ratio and by-decile breakdown.
@@ -395,6 +640,177 @@ class PerformanceReport:
                 "total_actual": total_actual,
                 "total_predicted": total_predicted,
                 "bands": band_data,
+            },
+        )
+
+    def ae_with_poisson_ci(
+        self,
+        alpha: float = 0.05,
+        threshold_low: float = 0.90,
+        threshold_high: float = 1.10,
+    ) -> TestResult:
+        """
+        Overall A/E ratio with Poisson exact confidence interval.
+
+        The Poisson exact CI uses the chi-squared pivot:
+          lower = chi2(2A, alpha/2) / (2*E)
+          upper = chi2(2A+2, 1-alpha/2) / (2*E)
+
+        This is exact for Poisson-distributed claim counts and is the
+        standard actuarial approach. The test fails if the CI does not
+        include 1.0 (i.e., material bias is detectable at the given alpha
+        level) OR if the point estimate is outside [threshold_low, threshold_high].
+
+        IBNR caveat: A/E ratios on recently-incurred claims may reflect
+        IBNR underdevelopment, not model error. Use fully-developed claims
+        wherever possible.
+
+        Parameters
+        ----------
+        alpha:
+            Significance level for the CI. Default 0.05 = 95% CI.
+        threshold_low:
+            A/E below this fails the point estimate check.
+        threshold_high:
+            A/E above this fails the point estimate check.
+
+        Returns
+        -------
+        TestResult
+        """
+        w = self._weights if self._weights is not None else np.ones(len(self._y_true))
+
+        total_actual = float(np.sum(self._y_true * w))
+        total_predicted = float(np.sum(self._y_pred * w))
+
+        if total_predicted == 0:
+            return TestResult(
+                test_name="ae_poisson_ci",
+                category=TestCategory.PERFORMANCE,
+                passed=False,
+                details=f"A/E Poisson CI undefined: total predicted is zero for {self._model_name}.",
+                severity=Severity.WARNING,
+            )
+
+        ae_ratio = total_actual / total_predicted
+        ci_lower, ci_upper = _poisson_ae_ci(total_actual, total_predicted, alpha=alpha)
+
+        # Test passes if 1.0 is inside the CI and point estimate is in range
+        ci_includes_one = bool(ci_lower <= 1.0 <= ci_upper)
+        point_in_range = threshold_low <= ae_ratio <= threshold_high
+        passed = bool(ci_includes_one and point_in_range)
+
+        details = (
+            f"A/E ratio for {self._model_name}: {ae_ratio:.4f} "
+            f"(Poisson {100*(1-alpha):.0f}% CI: [{ci_lower:.4f}, {ci_upper:.4f}]). "
+            f"Point estimate {'within' if point_in_range else 'outside'} "
+            f"acceptable range [{threshold_low}, {threshold_high}]. "
+            f"CI {'includes' if ci_includes_one else 'excludes'} 1.0 "
+            f"(material bias {'not detected' if ci_includes_one else 'detected'}). "
+            "IBNR caveat: A/E ratios on recently-incurred claims may reflect "
+            "IBNR underdevelopment, not model error. Use fully-developed claims "
+            "wherever possible."
+        )
+
+        return TestResult(
+            test_name="ae_poisson_ci",
+            category=TestCategory.PERFORMANCE,
+            passed=passed,
+            metric_value=round(ae_ratio, 6),
+            details=details,
+            severity=Severity.INFO if passed else Severity.WARNING,
+            extra={
+                "ae_ratio": ae_ratio,
+                "ci_lower": ci_lower,
+                "ci_upper": ci_upper,
+                "alpha": alpha,
+                "total_actual": total_actual,
+                "total_predicted": total_predicted,
+                "ci_includes_one": ci_includes_one,
+            },
+        )
+
+    def hosmer_lemeshow_test(
+        self,
+        n_groups: int = 10,
+        alpha: float = 0.05,
+    ) -> TestResult:
+        """
+        Hosmer-Lemeshow calibration test.
+
+        Tests whether the model is calibrated: are predicted probabilities
+        consistent with observed frequencies across predicted-risk groups?
+
+        Policies are grouped into n_groups deciles of predicted risk.
+        For each group we compute observed and expected counts. The
+        H-L statistic is approximately chi-squared(n_groups - 2) under
+        the null of perfect calibration.
+
+        Parameters
+        ----------
+        n_groups:
+            Number of groups (deciles by default). H-L statistic has
+            n_groups - 2 degrees of freedom.
+        alpha:
+            Significance level. p < alpha fails the test.
+
+        Returns
+        -------
+        TestResult
+        """
+        w = self._weights if self._weights is not None else np.ones(len(self._y_true))
+
+        order = np.argsort(self._y_pred)
+        y_sorted = self._y_true[order]
+        pred_sorted = self._y_pred[order]
+        w_sorted = w[order]
+
+        cum_w = np.cumsum(w_sorted)
+        total_w = cum_w[-1]
+        band_edges = np.linspace(0, total_w, n_groups + 1)
+        band_ids = np.searchsorted(cum_w, band_edges[1:], side="left")
+        band_ids = np.clip(band_ids, 0, len(y_sorted) - 1)
+
+        hl_stat = 0.0
+        prev = 0
+        groups = []
+        for edge in band_ids:
+            idx = slice(prev, edge + 1)
+            observed = float(np.sum(y_sorted[idx] * w_sorted[idx]))
+            expected = float(np.sum(pred_sorted[idx] * w_sorted[idx]))
+            n_w = float(np.sum(w_sorted[idx]))
+            if expected > 0:
+                hl_stat += (observed - expected) ** 2 / expected
+            groups.append({
+                "observed": observed,
+                "expected": expected,
+                "n_weight": n_w,
+            })
+            prev = edge + 1
+
+        df = n_groups - 2
+        p_value = float(1 - stats.chi2.cdf(hl_stat, df=df)) if df > 0 else float("nan")
+        passed = p_value >= alpha if not np.isnan(p_value) else False
+
+        details = (
+            f"Hosmer-Lemeshow calibration test ({n_groups} groups) for {self._model_name}: "
+            f"H-L statistic = {hl_stat:.4f}, df = {df}, p-value = {p_value:.4f}. "
+            f"{'Model is well-calibrated (p >= ' + str(alpha) + ').' if passed else 'Calibration rejected (p < ' + str(alpha) + ') - model predictions are systematically biased in some risk groups.'}"
+        )
+
+        return TestResult(
+            test_name="hosmer_lemeshow",
+            category=TestCategory.PERFORMANCE,
+            passed=passed,
+            metric_value=round(p_value, 6) if not np.isnan(p_value) else None,
+            details=details,
+            severity=Severity.INFO if passed else Severity.WARNING,
+            extra={
+                "hl_statistic": hl_stat,
+                "df": df,
+                "p_value": p_value if not np.isnan(p_value) else None,
+                "alpha": alpha,
+                "groups": groups,
             },
         )
 

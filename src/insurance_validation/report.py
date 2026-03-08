@@ -24,13 +24,15 @@ Usage
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from .model_card import ModelCard
-from .results import TestResult
+from .results import RAGStatus, TestResult
 
 
 class ReportGenerator:
@@ -47,6 +49,11 @@ class ReportGenerator:
         StabilityReport, or custom tests.
     generated_date:
         Date to stamp on the report. Defaults to today.
+    run_id:
+        UUID string for this validation run. Used for MRM system
+        ingestion and audit trail linkage. Auto-generated if None.
+    rag_status:
+        Overall RAG status. Auto-computed from results if None.
     """
 
     def __init__(
@@ -54,10 +61,19 @@ class ReportGenerator:
         card: ModelCard,
         results: list[TestResult],
         generated_date: date | None = None,
+        run_id: str | None = None,
+        rag_status: RAGStatus | None = None,
     ) -> None:
         self._card = card
         self._results = results
         self._generated_date = generated_date or date.today()
+        self._run_id = run_id or str(uuid.uuid4())
+
+        if rag_status is None:
+            from .results import compute_rag_status
+            self._rag_status = compute_rag_status(results)
+        else:
+            self._rag_status = rag_status
 
         self._env = Environment(
             loader=PackageLoader("insurance_validation", "templates"),
@@ -89,6 +105,8 @@ class ReportGenerator:
             card=self._card,
             results=result_dicts,
             generated_date=str(self._generated_date),
+            run_id=self._run_id,
+            rag_status=self._rag_status.value,
         )
 
     def write_html(self, path: str | Path) -> Path:
@@ -109,7 +127,7 @@ class ReportGenerator:
         out.write_text(self.render_html(), encoding="utf-8")
         return out
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """
         Serialise the full report to a plain dict for JSON export.
 
@@ -118,8 +136,10 @@ class ReportGenerator:
         dict
         """
         return {
+            "run_id": self._run_id,
             "model_card": self._card.model_dump(mode="json"),
             "generated_date": str(self._generated_date),
+            "rag_status": self._rag_status.value,
             "results": [r.to_dict() for r in self._results],
             "summary": {
                 "total_tests": len(self._results),
@@ -140,9 +160,10 @@ class ReportGenerator:
         """
         Write a JSON sidecar for audit trail ingestion.
 
-        The JSON contains the full model card, all test results, and a
-        summary. Suitable for ingestion into a model risk management
-        system or storage alongside the HTML report.
+        The JSON contains the full model card, all test results, a summary,
+        and the run_id UUID for linkage to an MRM system. Suitable for
+        ingestion into a model risk management system or storage alongside
+        the HTML report.
 
         Parameters
         ----------

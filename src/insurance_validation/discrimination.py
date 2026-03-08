@@ -10,6 +10,10 @@ Postcode is the canonical insurance example: postcodes correlate with
 ethnicity, and using postcode relativities without analysis creates disparate
 impact risk.
 
+The renewal cohort A/E test is an FCA TR24/2 requirement: renewal pricing
+must not systematically over-charge long-standing customers. We test A/E
+by tenure band and flag divergence outside [0.85, 1.15].
+
 Usage
 -----
     import polars as pl
@@ -28,6 +32,16 @@ Usage
         report.disparate_impact_ratio(
             predictions=predictions,
             group_col="age_band",
+        ),
+        report.renewal_cohort_ae(
+            y_true=claim_counts,
+            y_pred=predictions,
+            tenure_col="years_as_customer",
+        ),
+        report.subsegment_ae(
+            y_true=claim_counts,
+            y_pred=predictions,
+            segment_col="product_segment",
         ),
         report.subgroup_outcome_analysis(group_col="region"),
     ]
@@ -311,6 +325,238 @@ class DiscriminationReport:
                 "group_means": group_means,
                 "ratios": ratios,
                 "threshold": threshold,
+            },
+        )
+
+    def renewal_cohort_ae(
+        self,
+        y_true: np.ndarray | list,
+        y_pred: np.ndarray | list,
+        tenure_col: str,
+        weights: np.ndarray | list | None = None,
+        ae_low: float = 0.85,
+        ae_high: float = 1.15,
+        tenure_bands: list[tuple[int, int, str]] | None = None,
+    ) -> TestResult:
+        """
+        Compute A/E ratio by customer tenure band.
+
+        FCA TR24/2 requires that renewal pricing is not systematically
+        biased against long-standing customers (the "loyalty penalty"
+        concern). This test checks that the model A/E ratio is consistent
+        across tenure bands.
+
+        A divergence in A/E by tenure does not necessarily indicate the
+        model is wrong - it may reflect genuine risk differences between
+        new and renewing customers. But if predicted A/E is outside
+        [ae_low, ae_high] for any band, it warrants documentation.
+
+        Parameters
+        ----------
+        y_true:
+            Observed outcomes (claim counts).
+        y_pred:
+            Model predictions (expected counts).
+        tenure_col:
+            Column in ``df`` containing years as customer (integer).
+        weights:
+            Sample weights. If None, uniform.
+        ae_low:
+            Lower threshold for A/E ratio. Default 0.85 (FCA guidance).
+        ae_high:
+            Upper threshold. Default 1.15.
+        tenure_bands:
+            List of (min_tenure, max_tenure, label) tuples defining the
+            bands. Defaults to [(0, 0, "New"), (1, 1, "1yr"), (2, 2, "2yr"),
+            (3, 999, "3yr+")].
+
+        Returns
+        -------
+        TestResult. Fails if any band A/E is outside [ae_low, ae_high].
+        """
+        if tenure_col not in self._df.columns:
+            return TestResult(
+                test_name="renewal_cohort_ae",
+                category=TestCategory.FAIRNESS,
+                passed=False,
+                details=f"Tenure column '{tenure_col}' not found in dataset.",
+                severity=Severity.WARNING,
+            )
+
+        if tenure_bands is None:
+            tenure_bands = [
+                (0, 0, "New"),
+                (1, 1, "1yr"),
+                (2, 2, "2yr"),
+                (3, 9999, "3yr+"),
+            ]
+
+        y_true_arr = np.asarray(y_true, dtype=float)
+        y_pred_arr = np.asarray(y_pred, dtype=float)
+        w_arr = np.asarray(weights, dtype=float) if weights is not None else np.ones(len(y_true_arr))
+        tenure_vals = self._df[tenure_col].to_numpy()
+
+        band_results = []
+        any_failed = False
+
+        for t_min, t_max, label in tenure_bands:
+            mask = (tenure_vals >= t_min) & (tenure_vals <= t_max)
+            n = int(mask.sum())
+            if n == 0:
+                band_results.append({
+                    "band": label,
+                    "n": 0,
+                    "actual": 0.0,
+                    "predicted": 0.0,
+                    "ae_ratio": None,
+                    "in_range": True,
+                })
+                continue
+
+            actual = float(np.sum(y_true_arr[mask] * w_arr[mask]))
+            predicted = float(np.sum(y_pred_arr[mask] * w_arr[mask]))
+            ae = actual / predicted if predicted > 0 else float("nan")
+            in_range = ae_low <= ae <= ae_high if not np.isnan(ae) else False
+
+            if not in_range:
+                any_failed = True
+
+            band_results.append({
+                "band": label,
+                "n": n,
+                "actual": actual,
+                "predicted": predicted,
+                "ae_ratio": ae if not np.isnan(ae) else None,
+                "in_range": in_range,
+            })
+
+        passed = not any_failed
+
+        failing_bands = [b["band"] for b in band_results if not b["in_range"] and b["ae_ratio"] is not None]
+        if passed:
+            verdict = f"All tenure bands have A/E within [{ae_low}, {ae_high}]. No renewal cohort bias detected."
+        else:
+            verdict = (
+                f"A/E outside [{ae_low}, {ae_high}] in bands: {', '.join(failing_bands)}. "
+                "Review whether the model systematically under- or over-prices renewal business. "
+                "FCA TR24/2 requires documented justification for pricing differentials by tenure."
+            )
+
+        return TestResult(
+            test_name="renewal_cohort_ae",
+            category=TestCategory.FAIRNESS,
+            passed=passed,
+            metric_value=None,
+            details=f"Renewal cohort A/E by tenure band (threshold [{ae_low}, {ae_high}]). {verdict}",
+            severity=Severity.INFO if passed else Severity.WARNING,
+            extra={
+                "bands": band_results,
+                "ae_low": ae_low,
+                "ae_high": ae_high,
+            },
+        )
+
+    def subsegment_ae(
+        self,
+        y_true: np.ndarray | list,
+        y_pred: np.ndarray | list,
+        segment_col: str,
+        weights: np.ndarray | list | None = None,
+        ae_low: float = 0.85,
+        ae_high: float = 1.15,
+    ) -> TestResult:
+        """
+        Compute A/E ratio by product governance segment.
+
+        Sub-segment calibration checks whether the model is calibrated
+        within each product segment (e.g. Tier 1 / Tier 2 by NCD,
+        or by distribution channel). Material divergence within a segment
+        suggests the model has a systematic blind spot.
+
+        This supports PRA SS1/23 Principle 4 (outcome analysis) and FCA
+        Consumer Duty's requirement to demonstrate fair value by segment.
+
+        Parameters
+        ----------
+        y_true:
+            Observed outcomes.
+        y_pred:
+            Model predictions.
+        segment_col:
+            Column in ``df`` containing segment labels.
+        weights:
+            Sample weights. If None, uniform.
+        ae_low:
+            Lower A/E threshold. Default 0.85.
+        ae_high:
+            Upper A/E threshold. Default 1.15.
+
+        Returns
+        -------
+        TestResult. Fails if any segment A/E outside [ae_low, ae_high].
+        """
+        if segment_col not in self._df.columns:
+            return TestResult(
+                test_name=f"subsegment_ae_{segment_col}",
+                category=TestCategory.FAIRNESS,
+                passed=False,
+                details=f"Segment column '{segment_col}' not found in dataset.",
+                severity=Severity.WARNING,
+            )
+
+        y_true_arr = np.asarray(y_true, dtype=float)
+        y_pred_arr = np.asarray(y_pred, dtype=float)
+        w_arr = np.asarray(weights, dtype=float) if weights is not None else np.ones(len(y_true_arr))
+        segment_vals = self._df[segment_col].to_list()
+        unique_segs = sorted(set(s for s in segment_vals if s is not None))
+
+        seg_results = []
+        any_failed = False
+
+        for seg in unique_segs:
+            mask = np.array([s == seg for s in segment_vals])
+            n = int(mask.sum())
+            actual = float(np.sum(y_true_arr[mask] * w_arr[mask]))
+            predicted = float(np.sum(y_pred_arr[mask] * w_arr[mask]))
+            ae = actual / predicted if predicted > 0 else float("nan")
+            in_range = ae_low <= ae <= ae_high if not np.isnan(ae) else False
+
+            if not in_range:
+                any_failed = True
+
+            seg_results.append({
+                "segment": str(seg),
+                "n": n,
+                "actual": actual,
+                "predicted": predicted,
+                "ae_ratio": ae if not np.isnan(ae) else None,
+                "in_range": in_range,
+            })
+
+        passed = not any_failed
+        failing_segs = [s["segment"] for s in seg_results if not s["in_range"] and s["ae_ratio"] is not None]
+
+        if passed:
+            verdict = f"All segments within A/E range [{ae_low}, {ae_high}]."
+        else:
+            verdict = (
+                f"A/E outside [{ae_low}, {ae_high}] in segments: {', '.join(failing_segs)}. "
+                "Sub-segment miscalibration may indicate the model is systematically "
+                "wrong for a product segment. Review GLM offsets or GBM feature coverage."
+            )
+
+        return TestResult(
+            test_name=f"subsegment_ae_{segment_col}",
+            category=TestCategory.FAIRNESS,
+            passed=passed,
+            metric_value=None,
+            details=f"Sub-segment A/E by '{segment_col}' (threshold [{ae_low}, {ae_high}]). {verdict}",
+            severity=Severity.INFO if passed else Severity.WARNING,
+            extra={
+                "segment_col": segment_col,
+                "segments": seg_results,
+                "ae_low": ae_low,
+                "ae_high": ae_high,
             },
         )
 
