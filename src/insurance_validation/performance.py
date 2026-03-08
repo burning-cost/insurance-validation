@@ -82,7 +82,7 @@ def _weighted_gini(
     y = np.concatenate([[0], cumulative_loss / total_loss])
 
     # Area under Lorenz curve via trapezoid rule
-    auc = float(np.trapz(y, x))
+    auc = float(np.trapezoid(y, x))
     gini = 2 * auc - 1
     return float(np.clip(gini, -1.0, 1.0))
 
