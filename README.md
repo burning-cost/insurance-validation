@@ -4,6 +4,8 @@ Your model documentation is a Word doc. Your regulator wants evidence.
 
 PRA SS1/23, FCA Consumer Duty, and TR24/2 require that pricing models have documented, independent validation with traceable audit trails. In practice, most UK insurers have a collection of ad-hoc scripts, Excel workbooks, and email threads that they hope will pass scrutiny. This library turns that into a structured, reproducible HTML report with a JSON sidecar for audit trail ingestion.
 
+**Blog post:** [Model Validation Under PRA SS1/23: What the Regulator Actually Wants](https://burning-cost.github.io/2026/01/20/model-validation-pra-ss1-23/) — what Principle 4 requires in practice, why exposure-weighted Gini matters, and how to structure your validation evidence pack.
+
 ## What it does
 
 - Runs data quality checks (missing values, outliers, cardinality)
@@ -146,6 +148,41 @@ gen.write_json("motor_tppd_validation_2024.json")
 **No cloud dependency.** ValidMind (the closest existing tool) requires their platform for full functionality and is AGPL-licenced. This library runs entirely locally, outputs standard HTML and JSON, and is MIT-licenced.
 
 **Pydantic model card first.** You cannot generate a report without completing the model card. This is deliberate. Incomplete documentation is the most common validation failure - the library enforces completeness at construction time.
+
+## Other Burning Cost libraries
+
+**Model building**
+
+| Library | Description |
+|---------|-------------|
+| [shap-relativities](https://github.com/burning-cost/shap-relativities) | Extract rating relativities from GBMs using SHAP |
+| [insurance-interactions](https://github.com/burning-cost/insurance-interactions) | Automated GLM interaction detection via CANN and NID scores |
+| [insurance-cv](https://github.com/burning-cost/insurance-cv) | Walk-forward cross-validation respecting IBNR structure |
+
+**Uncertainty quantification**
+
+| Library | Description |
+|---------|-------------|
+| [insurance-conformal](https://github.com/burning-cost/insurance-conformal) | Distribution-free prediction intervals for Tweedie models |
+| [bayesian-pricing](https://github.com/burning-cost/bayesian-pricing) | Hierarchical Bayesian models for thin-data segments |
+| [credibility](https://github.com/burning-cost/credibility) | Bühlmann-Straub credibility weighting |
+
+**Deployment and optimisation**
+
+| Library | Description |
+|---------|-------------|
+| [insurance-deploy](https://github.com/burning-cost/insurance-deploy) | Champion/challenger framework with ENBP audit logging |
+| [insurance-elasticity](https://github.com/burning-cost/insurance-elasticity) | Causal price elasticity via Double Machine Learning |
+| [rate-optimiser](https://github.com/burning-cost/rate-optimiser) | Constrained rate change optimisation with FCA PS21/5 compliance |
+
+**Governance**
+
+| Library | Description |
+|---------|-------------|
+| [insurance-fairness](https://github.com/burning-cost/insurance-fairness) | Proxy discrimination auditing for UK insurance models |
+| [insurance-monitoring](https://github.com/burning-cost/insurance-monitoring) | Model monitoring: PSI, A/E ratios, Gini drift test |
+
+[All libraries and blog posts →](https://burning-cost.github.io)
 
 ## Licence
 
