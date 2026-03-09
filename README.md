@@ -4,7 +4,7 @@ Your model documentation is a Word doc. Your regulator wants evidence.
 
 PRA SS1/23, FCA Consumer Duty, and TR24/2 require that pricing models have documented, independent validation with traceable audit trails. In practice, most UK insurers have a collection of ad-hoc scripts, Excel workbooks, and email threads that they hope will pass scrutiny. This library turns that into a structured, reproducible HTML report with a JSON sidecar for audit trail ingestion.
 
-**Blog post:** [Model Validation Under PRA SS1/23: What the Regulator Actually Wants](https://burning-cost.github.io/2026/01/20/model-validation-pra-ss1-23/) — what Principle 4 requires in practice, why exposure-weighted Gini matters, and how to structure your validation evidence pack.
+**Blog post:** [Your Model Validation Report Won't Survive a PRA Review](https://burning-cost.github.io/2026/03/09/insurance-validation/) — what PRA SS1/23 Principle 4 requires in practice, why exposure-weighted Gini matters, and how to structure your validation evidence pack.
 
 ## What it does
 
