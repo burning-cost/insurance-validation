@@ -1,5 +1,6 @@
 # insurance-validation
 [![Tests](https://github.com/burning-cost/insurance-validation/actions/workflows/tests.yml/badge.svg)](https://github.com/burning-cost/insurance-validation/actions/workflows/tests.yml)
+[![CI](https://github.com/burning-cost/insurance-validation/actions/workflows/ci.yml/badge.svg)](https://github.com/burning-cost/insurance-validation/actions/workflows/ci.yml)
 
 Your model documentation is a Word doc. Your regulator wants evidence.
 
