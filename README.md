@@ -174,7 +174,7 @@ gen.write_json("motor_tppd_validation_2024.json")
 | Library | Description |
 |---------|-------------|
 | [insurance-deploy](https://github.com/burning-cost/insurance-deploy) | Champion/challenger framework with ENBP audit logging |
-| [insurance-elasticity](https://github.com/burning-cost/insurance-elasticity) | Causal price elasticity via Double Machine Learning |
+| [insurance-causal](https://github.com/burning-cost/insurance-causal) | Causal price elasticity and DML — includes elasticity subpackage |
 | [rate-optimiser](https://github.com/burning-cost/rate-optimiser) | Constrained rate change optimisation with FCA PS21/5 compliance |
 
 **Governance**
@@ -185,6 +185,21 @@ gen.write_json("motor_tppd_validation_2024.json")
 | [insurance-monitoring](https://github.com/burning-cost/insurance-monitoring) | Model monitoring: PSI, A/E ratios, Gini drift test |
 
 [All libraries and blog posts →](https://burning-cost.github.io)
+
+## Performance
+
+No formal benchmark. This library runs statistical tests on pre-computed model predictions — the bottleneck is always the model fit that produces `y_pred`, not the validation layer.
+
+| Task | Time (n=10,000 holdout rows) |
+|------|------------------------------|
+| DataQualityReport (missing, outliers, cardinality) | < 2s |
+| PerformanceReport (Gini, lift chart, A/E, PSI) | < 3s |
+| DiscriminationReport (proxy correlation, disparate impact) | < 5s |
+| StabilityReport (PSI, feature drift) | < 2s |
+| HTML report generation | < 1s |
+| JSON sidecar | < 1s |
+
+Full report for a single model: under 15 seconds. For 15 models in a quarterly validation cycle: under 5 minutes, not counting the model fits. This is the correct comparison point — bespoke analyst notebooks typically take 2–4 hours per model and produce inconsistent output.
 
 ## Licence
 
