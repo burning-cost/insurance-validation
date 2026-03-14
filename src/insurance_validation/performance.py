@@ -38,6 +38,12 @@ Usage
 from __future__ import annotations
 
 import numpy as np
+
+# numpy.trapezoid was added in 2.0; np.trapz was removed in 2.0
+try:
+    _trapezoid = np.trapezoid
+except AttributeError:
+    _trapezoid = np.trapz  # type: ignore[attr-defined]  # NumPy < 2.0
 from scipy import stats
 
 from .results import Severity, TestCategory, TestResult
@@ -82,7 +88,7 @@ def _weighted_gini(
     y = np.concatenate([[0], cumulative_loss / total_loss])
 
     # Area under Lorenz curve via trapezoid rule
-    auc = float(np.trapezoid(y, x))
+    auc = float(_trapezoid(y, x))
     gini = 2 * auc - 1
     return float(np.clip(gini, -1.0, 1.0))
 
