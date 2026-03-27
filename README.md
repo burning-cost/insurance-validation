@@ -1,3 +1,5 @@
+⚠️ **This package has been merged into [`insurance-governance`](https://github.com/burning-cost/insurance-governance).** This repository is archived. Install `insurance-governance` instead.
+
 # insurance-validation — Deprecated
 
 This package has been superseded by [insurance-governance](https://github.com/burning-cost/insurance-governance).
